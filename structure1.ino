@@ -3,9 +3,11 @@
 
 /*
  Vision System Test for Delivery Robot
- Simplified sensor test focused on Pixy2 vision and ultrasonic obstacle detection
- Feedback via Serial Monitor and external LED on pin 7
- Robot motion logic removed for stable sensor testing on Arduino Uno
+ Dual LED control based on object detection
+ - Blue ball: LED1 on
+ - Green ball: LED2 on
+ - Base: Both LEDs on
+ - Obstacle (≤10cm): Both LEDs blink
 */
 
 Pixy2 pixy;
@@ -21,112 +23,31 @@ constexpr uint8_t SIG_RED   = 2; // Forbidden ball
 constexpr uint8_t SIG_GREEN = 3; // Allowed ball
 constexpr uint8_t SIG_BLUE  = 4; // Allowed ball
 
-// External status LED
-constexpr uint8_t EXT_LED_PIN = 13;  // Use an external LED with series resistor
+// External status LEDs
+constexpr uint8_t LED1_PIN = 6;  // LED for Blue ball
+constexpr uint8_t LED2_PIN = 7;   // LED for Green ball
 
 // Ultrasonic sensor
 constexpr uint8_t TRIG_PIN = 10;
 constexpr uint8_t ECHO_PIN = 9;
 constexpr float OBSTACLE_CM_THRESHOLD = 10.0f;
+constexpr float OBSTACLE_TOLERANCE = 0.5f; // Detection range: 9.5cm to 10.5cm
 
-// LED pattern timings
-constexpr unsigned int LED_FAST_ON_MS   = 100;
-constexpr unsigned int LED_FAST_OFF_MS  = 100;
-constexpr unsigned int LED_BURST_GAP_MS = 300;
+// LED blink timing for obstacle detection
+constexpr unsigned int BLINK_INTERVAL_MS = 200;
 
-/* LED Pattern Engine */
-
-enum LedPatternType : uint8_t {
-  LED_NONE = 0,
-  LED_GREEN2,
-  LED_BLUE3,
-  LED_BASE4,
-  LED_OBSTACLE_FAST
+/* State variables */
+enum DetectionState : uint8_t {
+  STATE_NONE = 0,
+  STATE_BLUE,
+  STATE_GREEN,
+  STATE_BASE,
+  STATE_OBSTACLE
 };
 
-static LedPatternType currentPattern = LED_NONE;
-static bool ledIsOn = false;
-static uint8_t blinksCompletedInBurst = 0;
-static uint8_t targetBlinksInBurst = 0;
-static unsigned long nextLedEventAt = 0;
-static bool inBurstGap = false;
-
-static uint8_t patternPriority(LedPatternType p) {
-  switch (p) {
-    case LED_OBSTACLE_FAST: return 4;
-    case LED_BASE4:         return 3;
-    case LED_BLUE3:         return 2;
-    case LED_GREEN2:        return 1;
-    default:                return 0;
-  }
-}
-
-static void setPattern(LedPatternType newPattern) {
-  if (patternPriority(newPattern) < patternPriority(currentPattern)) return;
-  if (newPattern == currentPattern) return;
-
-  currentPattern = newPattern;
-
-  ledIsOn = false;
-  blinksCompletedInBurst = 0;
-  inBurstGap = false;
-
-  switch (currentPattern) {
-    case LED_GREEN2:        targetBlinksInBurst = 2; break;
-    case LED_BLUE3:         targetBlinksInBurst = 3; break;
-    case LED_BASE4:         targetBlinksInBurst = 4; break;
-    case LED_OBSTACLE_FAST: targetBlinksInBurst = 0; break; // continuous
-    default:                targetBlinksInBurst = 0; break;
-  }
-  nextLedEventAt = millis();
-}
-
-static void updateLedPattern() {
-  unsigned long now = millis();
-
-  if (currentPattern == LED_NONE) {
-    if (ledIsOn) {
-      digitalWrite(EXT_LED_PIN, LOW);
-      ledIsOn = false;
-    }
-    return;
-  }
-
-  if (currentPattern == LED_OBSTACLE_FAST) {
-    if (now >= nextLedEventAt) {
-      ledIsOn = !ledIsOn;
-      digitalWrite(EXT_LED_PIN, ledIsOn ? HIGH : LOW);
-      nextLedEventAt = now + (ledIsOn ? LED_FAST_ON_MS : LED_FAST_OFF_MS);
-    }
-    return;
-  }
-
-  if (inBurstGap) {
-    if (now >= nextLedEventAt) {
-      inBurstGap = false;
-      blinksCompletedInBurst = 0;
-    }
-    return;
-  }
-
-  if (now < nextLedEventAt) return;
-
-  if (!ledIsOn) {
-    digitalWrite(EXT_LED_PIN, HIGH);
-    ledIsOn = true;
-    nextLedEventAt = now + LED_FAST_ON_MS;
-  } else {
-    digitalWrite(EXT_LED_PIN, LOW);
-    ledIsOn = false;
-    blinksCompletedInBurst++;
-    if (blinksCompletedInBurst >= targetBlinksInBurst) {
-      inBurstGap = true;
-      nextLedEventAt = now + LED_BURST_GAP_MS;
-    } else {
-      nextLedEventAt = now + LED_FAST_OFF_MS;
-    }
-  }
-}
+static DetectionState currentState = STATE_NONE;
+static unsigned long lastBlinkTime = 0;
+static bool blinkState = false;
 
 /* Ultrasonic distance in centimeters */
 
@@ -145,6 +66,56 @@ long readUltrasonicCm() {
   return distanceCm;
 }
 
+/* LED Control Functions */
+
+void setLEDState(DetectionState state) {
+  currentState = state;
+  
+  switch (state) {
+    case STATE_BLUE:
+      // Blue ball detected: LED1 on, LED2 off
+      digitalWrite(LED1_PIN, HIGH);
+      digitalWrite(LED2_PIN, LOW);
+      break;
+      
+    case STATE_GREEN:
+      // Green ball detected: LED1 off, LED2 on
+      digitalWrite(LED1_PIN, LOW);
+      digitalWrite(LED2_PIN, HIGH);
+      break;
+      
+    case STATE_BASE:
+      // Base detected: Both LEDs on
+      digitalWrite(LED1_PIN, HIGH);
+      digitalWrite(LED2_PIN, HIGH);
+      break;
+      
+    case STATE_OBSTACLE:
+      // Obstacle detected: Both LEDs will blink (handled in updateLEDs)
+      break;
+      
+    case STATE_NONE:
+    default:
+      // Nothing detected: Both LEDs off
+      digitalWrite(LED1_PIN, LOW);
+      digitalWrite(LED2_PIN, LOW);
+      break;
+  }
+}
+
+void updateLEDs() {
+  if (currentState == STATE_OBSTACLE) {
+    // Blink both LEDs when obstacle is detected
+    unsigned long now = millis();
+    if (now - lastBlinkTime >= BLINK_INTERVAL_MS) {
+      blinkState = !blinkState;
+      digitalWrite(LED1_PIN, blinkState ? HIGH : LOW);
+      digitalWrite(LED2_PIN, blinkState ? HIGH : LOW);
+      lastBlinkTime = now;
+    }
+  }
+}
+
 /* Main */
 
 void setup() {
@@ -157,31 +128,45 @@ void setup() {
 
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
-  pinMode(EXT_LED_PIN, OUTPUT);
+  pinMode(LED1_PIN, OUTPUT);
+  pinMode(LED2_PIN, OUTPUT);
+  
   digitalWrite(TRIG_PIN, LOW);
-  digitalWrite(EXT_LED_PIN, LOW);
+  digitalWrite(LED1_PIN, LOW);
+  digitalWrite(LED2_PIN, LOW);
 
-  Serial.println("=== Vision System Test initialized ===");
-  Serial.println("Show objects to the camera to test detection.");
+  Serial.println("=== Vision System with Dual LED Control ===");
+  Serial.println("LED1 (Pin 6): Blue ball");
+  Serial.println("LED2 (Pin 7): Green ball");
+  Serial.println("Both LEDs: Base or Obstacle (blinking)");
 
   pixy.init();
 }
 
 void loop() {
-  // Ultrasonic obstacle check
+  // Ultrasonic obstacle check (highest priority)
   long distance = readUltrasonicCm();
-  if (distance > 0 && distance <= static_cast<long>(OBSTACLE_CM_THRESHOLD)) {
-    setPattern(LED_OBSTACLE_FAST);
-    Serial.print("Obstacle ultrasonic within ");
-    Serial.print(distance);
-    Serial.println(" cm");
+  // Only detect obstacle if distance is within tolerance range around 10cm
+  if (distance > 0 && 
+      distance >= static_cast<long>(OBSTACLE_CM_THRESHOLD - OBSTACLE_TOLERANCE) && 
+      distance <= static_cast<long>(OBSTACLE_CM_THRESHOLD + OBSTACLE_TOLERANCE)) {
+    if (currentState != STATE_OBSTACLE) {
+      setLEDState(STATE_OBSTACLE);
+      Serial.print("OBSTACLE DETECTED at ~10cm! Distance: ");
+      Serial.print(distance);
+      Serial.println(" cm");
+    }
+    updateLEDs();
+    return;
   }
 
   // Vision blocks
   pixy.ccc.getBlocks();
 
   if (pixy.ccc.numBlocks == 0) {
-    updateLedPattern();
+    if (currentState != STATE_NONE) {
+      setLEDState(STATE_NONE);
+    }
     return;
   }
 
@@ -194,40 +179,42 @@ void loop() {
     long area = static_cast<long>(block.m_width) * static_cast<long>(block.m_height);
 
     if (block.m_signature == SIG_BASE) {
-      Serial.print("Base detected S1 area ");
+      Serial.print("Base detected (S1) area: ");
       Serial.println(area);
       sawBase = true;
 
     } else if (block.m_signature == SIG_GREEN) {
-      Serial.print("Green ball detected S3 area ");
+      Serial.print("Green ball detected (S3) area: ");
       Serial.println(area);
       sawGreen = true;
 
     } else if (block.m_signature == SIG_BLUE) {
-      Serial.print("Blue ball detected S4 area ");
+      Serial.print("Blue ball detected (S4) area: ");
       Serial.println(area);
       sawBlue = true;
 
     } else if (block.m_signature == SIG_RED) {
-      Serial.print("Red ball ignored S2 area ");
+      Serial.print("Red ball ignored (S2) area: ");
       Serial.println(area);
-    } else {
-      // Unknown signature not used
     }
   }
 
-  // Apply vision pattern only if obstacle pattern is not active
-  if (patternPriority(currentPattern) < patternPriority(LED_OBSTACLE_FAST)) {
-    if (sawBase) {
-      setPattern(LED_BASE4);
-    } else if (sawBlue) {
-      setPattern(LED_BLUE3);
-    } else if (sawGreen) {
-      setPattern(LED_GREEN2);
-    } else {
-      setPattern(LED_NONE);
+  // Apply detection state based on priority
+  if (sawBase) {
+    if (currentState != STATE_BASE) {
+      setLEDState(STATE_BASE);
+    }
+  } else if (sawBlue) {
+    if (currentState != STATE_BLUE) {
+      setLEDState(STATE_BLUE);
+    }
+  } else if (sawGreen) {
+    if (currentState != STATE_GREEN) {
+      setLEDState(STATE_GREEN);
+    }
+  } else {
+    if (currentState != STATE_NONE) {
+      setLEDState(STATE_NONE);
     }
   }
-
-  updateLedPattern();
 }
