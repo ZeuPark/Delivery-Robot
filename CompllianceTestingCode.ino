@@ -36,11 +36,11 @@ void loop() {
 
 //----------------------------PixyCam-----------------------------------------
   bool ballDetected = false;
-  int blocks = pixy.ccc.getBlocks();
+  pixy.ccc.getBlocks();
   //if any objects are detected
   if (pixy.ccc.numBlocks) {
     for (int i = 0; i < pixy.ccc.numBlocks; i++) {
-      int sig = pixy.ccc.blocks[i];
+      int sig = pixy.ccc.blocks[i].m_signature;
       if (sig == blueBallSig) {
         ballDetected = true;
         Serial.print("Blue ball detected");
@@ -56,7 +56,7 @@ void loop() {
 
 // -------------------Obstacle Detection---------------------------------------
   //if an object that is not a green/blue ball is within 10cm 
-  if (!ballDetected && distance <= 10.0) {
+  if (!ballDetected && distance > 0 && distance <= 10.0) {
     int blinkDelay = 300;
     Serial.print("Distance: ");
     digitalWrite(ledPin, HIGH);
