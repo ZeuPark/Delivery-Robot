@@ -92,7 +92,7 @@ constexpr uint8_t SIG_RED   = 2; // Forbidden ball
 constexpr uint8_t SIG_GREEN = 3; // Allowed ball
 constexpr uint8_t SIG_BLUE  = 4; // Allowed ball
 
-uint8_t myBaseSig = 0;  // Detected base signature (0 = not detected yet)
+uint8_t myBaseSig = SIG_BASE;  // Fixed: always signature 1
 
 /* ==================== Motor Control Pins ==================== */
 #define PWMA 5      // Left motor PWM
@@ -339,48 +339,7 @@ bool passBaseFilter(const Block& b) {
 /* ==================== Base Detection ==================== */
 
 void detectMyBaseOnce() {
-  if (myBaseSig != 0) return;  // Already detected
-  
-  static uint8_t votes[5] = {0};
-  
-  // Sample 5 frames for voting
-  for (int k = 0; k < 5; k++) {
-    pixy.ccc.getBlocks();
-    int bestIdx = -1;
-    long bestArea = 0;
-    
-    for (int i = 0; i < pixy.ccc.numBlocks; i++) {
-      Block& b = pixy.ccc.blocks[i];
-      long area = (long)b.m_width * b.m_height;
-      
-      if (b.m_signature <= 4 && passBaseFilter(b) && area > bestArea) {
-        bestArea = area;
-        bestIdx = i;
-      }
-    }
-    
-    if (bestIdx >= 0) {
-      votes[pixy.ccc.blocks[bestIdx].m_signature]++;
-    }
-    delay(20);
-  }
-  
-  // Find signature with most votes
-  uint8_t bestSig = 0;
-  uint8_t bestVote = 0;
-  for (uint8_t s = 1; s <= 4; s++) {
-    if (votes[s] > bestVote) {
-      bestVote = votes[s];
-      bestSig = s;
-    }
-  }
-  
-  // Require at least 3 votes out of 5
-  if (bestVote >= 3) {
-    myBaseSig = bestSig;
-    Serial.print("Base sig=");
-    Serial.println(myBaseSig);
-  }
+  myBaseSig = SIG_BASE;  // Always fixed to signature 1
 }
 
 /* ==================== Utility Functions ==================== */
