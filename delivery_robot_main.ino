@@ -65,6 +65,17 @@ constexpr float TRACK_WIDTH_CM = 14.0f;        // Track width (cm) - measure act
 // Safety
 constexpr uint8_t KILL_PIN = A2;                // Emergency stop pin (pull-up to GND)
 
+// Kill switch debouncing
+bool killAsserted() {
+  static unsigned long t = 0;
+  if (digitalRead(KILL_PIN) == LOW) {
+    if (millis() - t > 30) return true;  // Debounce: 30ms
+  } else {
+    t = millis();
+  }
+  return false;
+}
+
 // Telemetry
 constexpr unsigned long TELEMETRY_INTERVAL = 200;  // ms between telemetry logs
 
@@ -98,7 +109,7 @@ uint8_t myBaseSig = 0;  // Detected base signature (0 = not detected yet)
 // Encoder debouncing
 volatile unsigned long lastEdgeA = 0;
 volatile unsigned long lastEdgeB = 0;
-constexpr unsigned long ENC_DEBOUNCE_US = 200;
+constexpr unsigned long ENC_DEBOUNCE_US = 400;  // Increased for stability (200->400us)
 
 // Encoder counts
 volatile long countA = 0;  // Left encoder count
@@ -110,8 +121,8 @@ volatile long countB = 0;   // Right encoder count
 /* ==================== Dual Servo/Gripper Control ==================== */
 Servo leftServo;
 Servo rightServo;
-constexpr uint8_t SERVO_LEFT_PIN = 10;
-constexpr uint8_t SERVO_RIGHT_PIN = 11;
+constexpr uint8_t SERVO_LEFT_PIN = 11;
+constexpr uint8_t SERVO_RIGHT_PIN = A3;  // Use analog pin as digital (avoid SPI SS conflict)
 
 // Servo positions (microseconds) - needs calibration
 constexpr int L_CLOSED = 1000;     // Left closed (example value)
@@ -265,6 +276,7 @@ void serviceSonar() {
       }
       if (afterOrEqual(m, sonar.t0 + 30000UL)) {
         sonar.dist = -1;
+        pushSonar(-1);  // Clear buffer residue to prevent false obstacle detection
         sonar.phase = Sonar::IDLE;
       }
     } break;
@@ -273,9 +285,7 @@ void serviceSonar() {
 
 bool isObstacleDetectedCached() {
   static uint8_t hit = 0;
-  bool ok = sonar.dist > 0 &&
-            sonar.dist >= (long)(OBSTACLE_CM_THRESHOLD - OBSTACLE_TOLERANCE) &&
-            sonar.dist <= (long)(OBSTACLE_CM_THRESHOLD + OBSTACLE_TOLERANCE);
+  bool ok = sonar.dist > 0 && sonar.dist <= (long)OBSTACLE_CM_THRESHOLD;  // Detect if distance is below threshold
   
   if (ok) {
     if (hit < 3) hit++;
@@ -421,16 +431,28 @@ void scanForObjects() {
     }
     // Red ball (SIG_RED) is ignored
   }
+  
+  // Reset area to 0 when object is not detected to prevent stale values from affecting decisions
+  if (!lastDetectedBall.found) lastDetectedBall.area = 0;
+  if (!lastDetectedBase.found) lastDetectedBase.area = 0;
 }
 
 void smoothDetections() {
   if (lastDetectedBall.found) {
     ballS.x = ema(ballS.x, lastDetectedBall.x, 0.3f);
     ballS.area = ema(ballS.area, lastDetectedBall.area, 0.3f);
+  } else {
+    // Reset EMA when ball is not detected to prevent stale values
+    ballS.x = -1;
+    ballS.area = -1;
   }
   if (lastDetectedBase.found) {
     baseS.x = ema(baseS.x, lastDetectedBase.x, 0.3f);
     baseS.area = ema(baseS.area, lastDetectedBase.area, 0.3f);
+  } else {
+    // Reset EMA when base is not detected to prevent stale values
+    baseS.x = -1;
+    baseS.area = -1;
   }
 }
 
@@ -450,6 +472,12 @@ void enterState(RobotState s) {
   if (s == STATE_RETURN_BASE) {
     searchStart = 0;  // Reset search tracking
   }
+  
+  // State transition telemetry
+  Serial.print("#STATE,");
+  Serial.print(stateName(s));
+  Serial.print(",t=");
+  Serial.println(stateEnterAt);
 }
 
 bool expired(unsigned long ms) {
@@ -589,7 +617,21 @@ void gripperFlick() {
 void driveToCenterX(int16_t x, int baseSpeed = MOTOR_BASE_SPEED) {
   const int16_t CX = PIXY_CENTER_X;
   int16_t err = x - CX;
-  int u = constrain(err, -100, 100);  // Proportional control
+  
+  // Deadband: go straight if within tolerance range
+  if (abs(err) <= PIXY_CENTER_TOLERANCE) {
+    digitalWrite(DIRA, LOW);
+    digitalWrite(DIRB, LOW);
+    analogWrite(PWMA, baseSpeed);
+    analogWrite(PWMB, baseSpeed);
+    lastPWM_L = baseSpeed;
+    lastPWM_R = baseSpeed;
+    return;
+  }
+  
+  // Proportional gain with constrained output
+  const float Kp = 0.6f;
+  int u = constrain((int)(Kp * err), -120, 120);
   int left = constrain(baseSpeed - u, 0, 255);
   int right = constrain(baseSpeed + u, 0, 255);
   digitalWrite(DIRA, LOW);
@@ -602,14 +644,21 @@ void driveToCenterX(int16_t x, int baseSpeed = MOTOR_BASE_SPEED) {
 
 void approachWithArea(const DetectedObject& obj) {
   // Use smoothed area for speed calculation
-  long a = (long)ballS.area;
-  // Speed ramping based on area: closer (larger area) = slower
-  int v = MOTOR_SPEED_SLOW + constrain((int)((a * 1.0f / BALL_PICKUP_AREA) * 80), 0, 80);
-  driveToCenterX((int)ballS.x, v);  // Use smoothed x
+  // As distance decreases, area increases, so speed should decrease (slower when closer)
+  // Check if smoothed values are valid (not -1)
+  if (ballS.area < 0 || ballS.x < 0) {
+    // Fallback to raw detection values if smoothing not initialized
+    driveToCenterX(obj.x, MOTOR_SPEED_SLOW);
+    return;
+  }
+  long a = max(1L, (long)ballS.area);
+  float ratio = min(1.0f, (float)a / (float)BALL_PICKUP_AREA);
+  int v = MOTOR_SPEED_SLOW + (int)((1.0f - ratio) * 80);  // Slower when closer
+  driveToCenterX((int)ballS.x, v);
 }
 
-void centerOnObject(DetectedObject& obj) {
-  driveToCenterX((int)baseS.x, MOTOR_BASE_SPEED);  // Use smoothed x for base
+void centerOnObject(const DetectedObject& obj) {
+  driveToCenterX(obj.x, MOTOR_BASE_SPEED);  // Use parameter instead of baseS
 }
 
 bool isObjectCloseEnough(DetectedObject& obj, long minArea = BALL_PICKUP_AREA) {
@@ -622,16 +671,29 @@ bool isObjectCloseEnough(DetectedObject& obj, long minArea = BALL_PICKUP_AREA) {
 }
 
 bool pickupConfirmed() {
+  static unsigned long tFirst = 0;
+  if (tFirst == 0) tFirst = millis();
+  if (millis() - tFirst < 250) return false;  // Minimum wait time (gripper closing time)
+  
+  bool ballVisible = false;
   pixy.ccc.getBlocks();
   for (int i = 0; i < pixy.ccc.numBlocks; i++) {
-    if (pixy.ccc.blocks[i].m_signature == SIG_GREEN || pixy.ccc.blocks[i].m_signature == SIG_BLUE) {
-      long area = (long)pixy.ccc.blocks[i].m_width * pixy.ccc.blocks[i].m_height;
-      if (area > BALL_MIN_AREA) {
-        return false;  // Ball still visible
-      }
+    auto& b = pixy.ccc.blocks[i];
+    if ((b.m_signature == SIG_GREEN || b.m_signature == SIG_BLUE) &&
+        ((long)b.m_width * b.m_height) > BALL_MIN_AREA) {
+      ballVisible = true;
+      break;
     }
   }
-  return true;  // Ball disappeared, likely picked up
+  
+  // Check for proximity signal: if ball is in gripper, close-range reflection reduces distance
+  bool nearObstacleRise = (sonar.dist > 0 && sonar.dist < 12);
+  
+  if (!ballVisible || nearObstacleRise) {
+    tFirst = 0;  // Reset for next pickup
+    return true;
+  }
+  return false;
 }
 
 const char* stateName(RobotState s) {
@@ -805,7 +867,7 @@ void executeState() {
       }
       break;
       
-    case STATE_SEARCH_BALL:
+    case STATE_SEARCH_BALL: {
       scanForObjects();
       smoothDetections();
       
@@ -824,11 +886,38 @@ void executeState() {
       
       if (lastDetectedBall.found) {
         enterState(STATE_APPROACH_BALL);
-      } else {
-        // Search pattern: move forward, turn periodically
-        motorForward();
+        break;
       }
-      break;
+      
+      // Enhanced search pattern: sweep (forward + turn)
+      static unsigned long sweepT0 = 0;
+      static bool turning = false;
+      static unsigned long lastStateEntry = 0;
+      
+      // Initialize sweep timer on state entry (detect state change)
+      if (lastStateEntry != stateEnterAt) {
+        sweepT0 = stateEnterAt;  // Use state entry time
+        lastStateEntry = stateEnterAt;
+        turning = false;
+      }
+      
+      unsigned long now = millis();
+      if (!turning) {
+        motorForward(MOTOR_SPEED_SLOW);
+        if (now - sweepT0 > 1200) {  // Forward for 1.2s
+          turning = true;
+          sweepT0 = now;
+          motorStop();
+        }
+      } else {
+        motorTurnLeft(MOTOR_SPEED_TURN);
+        if (now - sweepT0 > 800) {  // Turn for 0.8s
+          turning = false;
+          sweepT0 = now;
+          motorStop();
+        }
+      }
+    } break;
       
     case STATE_APPROACH_BALL:
       scanForObjects();
@@ -853,8 +942,8 @@ void executeState() {
         break;
       }
       
-      // Use smoothed values for decision
-      if (ballS.area >= BALL_PICKUP_AREA) {
+      // Use smoothed values for decision (check if valid)
+      if (ballS.area > 0 && ballS.area >= BALL_PICKUP_AREA) {
         motorStop();
         enterState(STATE_PICKUP_BALL);
       } else {
@@ -921,7 +1010,8 @@ void executeState() {
       
       if (lastDetectedBase.found) {
         searchStart = 0;  // Reset search timer
-        if (baseS.area >= BASE_DEPOSIT_AREA) {
+        // Check if smoothed area is valid before comparing
+        if (baseS.area > 0 && baseS.area >= BASE_DEPOSIT_AREA) {
           motorStop();
           enterState(STATE_DEPOSIT_BALL);
         } else {
@@ -1003,7 +1093,7 @@ void setup() {
   Serial.println("=== Delivery Robot Initializing ===");
   
   // Initialize SPI (required for Pixy2 on Uno)
-  pinMode(10, OUTPUT);  // SPI SS stabilization (even if servo uses pin 10)
+  pinMode(10, OUTPUT);  // SPI SS stabilization (servos moved to pin 11 and A3 to avoid conflict)
   digitalWrite(10, HIGH);
   
   // Initialize ultrasonic sensor
@@ -1102,8 +1192,8 @@ void logTelemetry() {
 /* ==================== Main Loop ==================== */
 
 void loop() {
-  // Safety check - emergency stop
-  if (digitalRead(KILL_PIN) == LOW) {
+  // Safety check - emergency stop (with debouncing)
+  if (killAsserted()) {
     motorStop();
     return;
   }
