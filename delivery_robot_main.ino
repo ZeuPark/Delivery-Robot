@@ -216,6 +216,9 @@ inline bool afterOrEqual(unsigned long a, unsigned long b) {
 
 /* ==================== Ultrasonic Sensor (Non-blocking with Median Filter) ==================== */
 
+// Forward declaration (needed by serviceSonar)
+inline bool gripperIsClosed();
+
 // Periodic asynchronous ultrasonic measurement
 struct Sonar {
   enum {IDLE, TRIG_HIGH, WAIT_ECHO} phase = IDLE;
