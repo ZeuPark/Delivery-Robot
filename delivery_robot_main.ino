@@ -35,9 +35,13 @@ constexpr float ASPECT_RATIO_MIN = 0.5f;   // Minimum width/height ratio
 constexpr float ASPECT_RATIO_MAX = 2.0f;   // Maximum width/height ratio
 constexpr int PIXY_BRIGHTNESS = 117;        // Camera brightness (0-255)
 
-// Ultrasonic Sensor
-constexpr uint8_t TRIG_PIN = A0;           // Pin 14 (A0 as digital)
-constexpr uint8_t ECHO_PIN = A1;           // Pin 15 (A1 as digital)
+// Ultrasonic Sensors
+// First ultrasonic (obstacle detection)
+constexpr uint8_t TRIG1_PIN = A0;           // Pin 14 (A0 as digital)
+constexpr uint8_t ECHO1_PIN = A1;           // Pin 15 (A1 as digital)
+// Second ultrasonic (gripper closed detection)
+constexpr uint8_t TRIG2_PIN = A4;           // Pin 18 (A4 as digital)
+constexpr uint8_t ECHO2_PIN = A5;           // Pin 19 (A5 as digital)
 constexpr float OBSTACLE_CM_THRESHOLD = 10.0f;
 constexpr float OBSTACLE_TOLERANCE = 0.5f; // Detection range: 9.5cm to 10.5cm
 constexpr int SONAR_MEDIAN_SIZE = 5;       // Median filter buffer size
@@ -255,31 +259,54 @@ void serviceSonar() {
   static unsigned long lastShot = 0;
   if (now - lastShot < 30) return;
 
+  // Fixed sensor selection for one cycle (prevents echo mixing)
+  static uint8_t curTrig = TRIG1_PIN;
+  static uint8_t curEcho = ECHO1_PIN;
+
   switch (sonar.phase) {
-    case Sonar::IDLE:
-      digitalWrite(TRIG_PIN, LOW);
+    case Sonar::IDLE: {
+      // Switch sensor only in IDLE phase based on gripper state
+      uint8_t nextTrig = gripperIsClosed() ? TRIG2_PIN : TRIG1_PIN;
+      uint8_t nextEcho = gripperIsClosed() ? ECHO2_PIN : ECHO1_PIN;
+
+      // Clear filter buffer when switching sensors to remove residue
+      if (nextTrig != curTrig || nextEcho != curEcho) {
+        curTrig = nextTrig;
+        curEcho = nextEcho;
+        for (int i = 0; i < N; i++) sonarBuf[i] = -1;
+        idx = 0;
+        sonar.echoStart = sonar.echoEnd = 0;
+        sonar.dist = -1;
+      }
+
+      digitalWrite(curTrig, LOW);
       delayMicroseconds(2);
-      digitalWrite(TRIG_PIN, HIGH);
+      digitalWrite(curTrig, HIGH);
       delayMicroseconds(10);
-      digitalWrite(TRIG_PIN, LOW);
+      digitalWrite(curTrig, LOW);
       sonar.t0 = micros();
       sonar.phase = Sonar::WAIT_ECHO;
       lastShot = now;
-      break;
+    } break;
+
     case Sonar::WAIT_ECHO: {
       unsigned long m = micros();
-      if (digitalRead(ECHO_PIN) == HIGH && sonar.echoStart == 0) sonar.echoStart = m;
-      if (digitalRead(ECHO_PIN) == LOW && sonar.echoStart != 0 && sonar.echoEnd == 0) {
+
+      if (digitalRead(curEcho) == HIGH && sonar.echoStart == 0) sonar.echoStart = m;
+      if (digitalRead(curEcho) == LOW && sonar.echoStart != 0 && sonar.echoEnd == 0) {
         unsigned long dur = afterOrEqual(m, sonar.echoStart) ? (m - sonar.echoStart) : 0;
         long rawDist = dur > 0 ? (long)(dur * 0.0343f / 2.0f) : -1;
-        pushSonar(rawDist);  // Add to median filter buffer
-        sonar.dist = medianN();  // Use median value (filters negatives)
+        pushSonar(rawDist);
+        sonar.dist = medianN();
         sonar.echoStart = sonar.echoEnd = 0;
         sonar.phase = Sonar::IDLE;
       }
+
+      // Timeout (no echo) handling
       if (afterOrEqual(m, sonar.t0 + 30000UL)) {
         sonar.dist = -1;
-        pushSonar(-1);  // Clear buffer residue to prevent false obstacle detection
+        pushSonar(-1);
+        sonar.echoStart = sonar.echoEnd = 0;
         sonar.phase = Sonar::IDLE;
       }
     } break;
@@ -572,6 +599,12 @@ void gripperCollect() {
 
 void gripperFlick() {
   gripperMove(L_OPEN, R_OPEN, 1000);  // Flick uses open position
+}
+
+// Gripper state check for sensor switching
+inline bool gripperIsClosed() {
+  // Closed if gripper is at closed position
+  return (sjob.l_us == L_CLOSED && sjob.r_us == R_CLOSED);
 }
 
 /* ==================== Navigation Functions ==================== */
@@ -1058,10 +1091,14 @@ void setup() {
   pinMode(10, OUTPUT);  // SPI SS stabilization (servos moved to pin 11 and A3 to avoid conflict)
   digitalWrite(10, HIGH);
   
-  // Initialize ultrasonic sensor
-  pinMode(TRIG_PIN, OUTPUT);
-  pinMode(ECHO_PIN, INPUT);
-  digitalWrite(TRIG_PIN, LOW);
+  // Initialize ultrasonic sensors
+  pinMode(TRIG1_PIN, OUTPUT);
+  pinMode(ECHO1_PIN, INPUT);
+  digitalWrite(TRIG1_PIN, LOW);
+  
+  pinMode(TRIG2_PIN, OUTPUT);
+  pinMode(ECHO2_PIN, INPUT);
+  digitalWrite(TRIG2_PIN, LOW);
   
   // Initialize motor pins
   pinMode(PWMA, OUTPUT);
@@ -1115,7 +1152,7 @@ void setup() {
   }
   
   Serial.println("=== Ready to start ===");
-  Serial.println("time,state,dist,ball_x,ball_area,base_x,base_area,countA,countB,pwm_L,pwm_R");  // CSV header
+  Serial.println("time,state,dist,sonar_idx,ball_x,ball_area,base_x,base_area,countA,countB,pwm_L,pwm_R");  // CSV header
   
   enterState(STATE_INIT);
   initDone = false;
@@ -1133,6 +1170,8 @@ void logTelemetry() {
   Serial.print(stateName(currentState));
   Serial.print(',');
   Serial.print(sonar.dist);
+  Serial.print(',');
+  Serial.print(gripperIsClosed() ? 2 : 1);  // Active sonar index (1=obstacle, 2=gripper)
   Serial.print(',');
   Serial.print(lastDetectedBall.found ? lastDetectedBall.x : -1);
   Serial.print(',');
