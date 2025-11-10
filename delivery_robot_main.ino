@@ -173,6 +173,9 @@ DepositStep dpStep = DP_FLICK;
 // State recovery tracking
 static unsigned long searchStart = 0;
 
+// Pickup confirmation timer (global to allow reset on state re-entry)
+static unsigned long pickupJudgeStart = 0;
+
 // Motor command tracking for telemetry
 int lastPWM_L = 0;
 int lastPWM_R = 0;
@@ -465,6 +468,7 @@ void enterState(RobotState s) {
   // Initialize substeps
   if (s == STATE_PICKUP_BALL) {
     pkStep = PK_COLLECT;
+    pickupJudgeStart = 0;  // Reset pickup confirmation timer on state re-entry
   }
   if (s == STATE_DEPOSIT_BALL) {
     dpStep = DP_FLICK;
@@ -671,9 +675,8 @@ bool isObjectCloseEnough(DetectedObject& obj, long minArea = BALL_PICKUP_AREA) {
 }
 
 bool pickupConfirmed() {
-  static unsigned long tFirst = 0;
-  if (tFirst == 0) tFirst = millis();
-  if (millis() - tFirst < 250) return false;  // Minimum wait time (gripper closing time)
+  if (pickupJudgeStart == 0) pickupJudgeStart = millis();
+  if (millis() - pickupJudgeStart < 250) return false;  // Minimum wait time (gripper closing time)
   
   bool ballVisible = false;
   pixy.ccc.getBlocks();
@@ -690,7 +693,7 @@ bool pickupConfirmed() {
   bool nearObstacleRise = (sonar.dist > 0 && sonar.dist < 12);
   
   if (!ballVisible || nearObstacleRise) {
-    tFirst = 0;  // Reset for next pickup
+    pickupJudgeStart = 0;  // Reset for next pickup
     return true;
   }
   return false;
