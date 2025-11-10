@@ -450,6 +450,9 @@ void smoothDetections() {
 
 /* ==================== State Management ==================== */
 
+// Forward declarations
+const char* stateName(RobotState s);
+
 void enterState(RobotState s) {
   currentState = s;
   stateEnterAt = millis();
@@ -611,6 +614,10 @@ inline bool gripperIsClosed() {
 }
 
 /* ==================== Navigation Functions ==================== */
+
+// Forward declarations
+void approachWithArea(const DetectedObject& obj);
+void centerOnObject(const DetectedObject& obj);
 
 // Replace rotation control with proportional control - differential PWM distribution based on Pixy X error
 void driveToCenterX(int16_t x, int baseSpeed = MOTOR_BASE_SPEED) {
