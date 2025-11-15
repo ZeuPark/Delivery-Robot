@@ -43,7 +43,7 @@ const int FWD_PWM   = 150;
 const int TARGET_GRAB_CM = 6;
 
 // base area thresholds
-const uint32_t BASE_AREA_MIN     = 800;
+const uint32_t BASE_AREA_MIN     = 200;
 const uint32_t BASE_AREA_RELEASE = 20000;
 const uint32_t MIN_BALL_AREA     = 1500;  // tune this later
 
