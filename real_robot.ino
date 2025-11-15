@@ -251,7 +251,7 @@ void updateBallPhase() {
       if (abs(error) > TOL_ALIGN_BALL) {
         if (error < 0) turnLeft();
         else           turnRight();
-        delay(60);
+        delay(40);
         motorsStop();
       } else {
         motorsStop();
@@ -284,7 +284,7 @@ void updateBallPhase() {
       if (abs(error) > BIG_MISALIGN_BALL) {
         if (error < 0) turnLeft();
         else           turnRight();
-        delay(50);
+        delay(30);
         motorsStop();
         break;
       }
@@ -348,7 +348,7 @@ void updateBasePhase() {
       if (abs(error) > TOL_ALIGN_BASE) {
         if (error < 0) turnLeft();
         else           turnRight();
-        delay(60);
+        delay(40);
         motorsStop();
       } else {
         motorsStop();
@@ -383,13 +383,13 @@ void updateBasePhase() {
       if (abs(error) > BIG_MISALIGN_BASE) {
         if (error < 0) turnLeft();
         else           turnRight();
-        delay(50);
+        delay(30);
         motorsStop();
         break;
       }
 
       forwardCont();
-      delay(40);
+      delay(30);
       break;
     }
 
