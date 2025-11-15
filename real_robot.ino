@@ -45,7 +45,6 @@ const int TARGET_GRAB_CM = 6;
 // base area thresholds
 const uint32_t BASE_AREA_MIN     = 200;
 const uint32_t BASE_AREA_RELEASE = 20000;
-const uint32_t MIN_BALL_AREA     = 1500;  // tune this later
 
 // smoothing for debug log only
 const float AREA_SMOOTH_ALPHA = 0.7f;
@@ -147,7 +146,6 @@ bool selectBall(int &xOut) {
     auto &b = pixy.ccc.blocks[i];
     if (b.m_signature == SIG_GREEN || b.m_signature == SIG_BLUE) {
       uint32_t area = (uint32_t)b.m_width * b.m_height;
-      if (area < MIN_BALL_AREA) continue;
       if (area > bestArea) {
         bestArea = area;
         bestX = b.m_x;
