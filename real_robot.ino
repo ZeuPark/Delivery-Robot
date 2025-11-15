@@ -88,7 +88,6 @@ enum BaseState {
 
 BaseState bState = B_SEEK_BASE;
 
-float baseAreaSmooth = 0.0f;
 bool alreadyReleased = false;
 
 // motor helpers
@@ -320,15 +319,6 @@ void updateBasePhase() {
   uint32_t baseAreaRaw = 0;
   bool hasBase = selectBaseBlock(baseX, baseAreaRaw);
 
-  if (hasBase) {
-    if (baseAreaSmooth <= 0.0f) baseAreaSmooth = baseAreaRaw;
-    else baseAreaSmooth = AREA_SMOOTH_ALPHA * baseAreaSmooth
-                        + (1.0f - AREA_SMOOTH_ALPHA) * baseAreaRaw;
-  } else {
-    baseAreaSmooth *= 0.9f;
-    if (baseAreaSmooth < 1.0f) baseAreaSmooth = 0.0f;
-  }
-
   Serial.print("[BASE] st=");
   Serial.print((int)bState);
   Serial.print(" hasBase=");
@@ -341,8 +331,6 @@ void updateBasePhase() {
     Serial.print(e);
     Serial.print(" areaRaw=");
     Serial.print(baseAreaRaw);
-    Serial.print(" areaSmooth=");
-    Serial.print(baseAreaSmooth);
   }
   Serial.println();
 
@@ -387,7 +375,6 @@ void updateBasePhase() {
 
         servoReleaseSlow();
 
-        baseAreaSmooth = 0.0f;
         alreadyReleased = true;
         bState = B_RELEASE_DONE;
         break;
@@ -438,7 +425,6 @@ void setup() {
   phase = PHASE_FIND_BALL;
   gState = G_SEEK_ALIGN;
   bState = B_SEEK_BASE;
-  baseAreaSmooth = 0.0f;
   alreadyReleased = false;
 
   Serial.println("Full robot  ball grab with ultrasonic, base score with Pixy");
@@ -453,7 +439,6 @@ void loop() {
         phase = PHASE_FIND_BASE;
         bState = B_SEEK_BASE;
         alreadyReleased = false;
-        baseAreaSmooth = 0.0f;
         delay(200);
       }
       break;
