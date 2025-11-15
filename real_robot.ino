@@ -18,12 +18,13 @@ constexpr uint8_t SERVO_LEFT_PIN  = A4;
 constexpr uint8_t SERVO_RIGHT_PIN = A3;
 
 // Pixy signatures
-constexpr uint8_t SIG_GREEN = 3;   // ball
-constexpr uint8_t SIG_BLUE  = 4;   // ball
-constexpr uint8_t SIG_BASE  = 1;   // base
+// base 1, ball 3 4
+constexpr uint8_t SIG_BASE  = 1;
+constexpr uint8_t SIG_GREEN = 3;
+constexpr uint8_t SIG_BLUE  = 4;
 
-// Pixy center and tolerances
-const int CENTER_X        = 158;
+// center
+const int CENTER_X = 158;
 
 // ball align
 const int TOL_ALIGN_BALL      = 20;
@@ -34,19 +35,24 @@ const int BIG_MISALIGN_BALL   = 40;
 const int TOL_ALIGN_BASE = 20;
 const int BIG_MISALIGN_BASE = 40;
 
-// speeds
-const int TURN_PWM  = 140;
-const int SEEK_PWM  = 120;
-const int FWD_PWM   = 150;
+// motor speed for ball phase
+const int TURN_PWM_BALL = 140;
+const int SEEK_PWM_BALL = 120;
+const int FWD_PWM_BALL  = 150;
 
-// ultrasonic distance for grab (cm)
+// motor speed for base phase (같이 씀)
+const int TURN_PWM_BASE = 140;
+const int SEEK_PWM_BASE = 120;
+const int FWD_PWM_BASE  = 150;
+
+// distance for grab
 const int TARGET_GRAB_CM = 6;
 
-// base area thresholds
-const uint32_t BASE_AREA_MIN     = 200;
+// base area conditions
+const uint32_t BASE_AREA_MIN     = 800;
 const uint32_t BASE_AREA_RELEASE = 20000;
 
-// smoothing for debug log only
+// smoothing for log
 const float AREA_SMOOTH_ALPHA = 0.7f;
 
 // servo positions
@@ -69,27 +75,29 @@ enum Phase {
 
 Phase phase = PHASE_FIND_BALL;
 
-// ball state machine
+// ball state machine (테스트 코드 그대로 사용)
 enum GrabState {
-  G_SEEK_ALIGN,
-  G_APPROACH_US,
-  G_GRAB_DONE
+  SEEK_ALIGN,
+  APPROACH_US,
+  GRAB_DONE
 };
 
-GrabState gState = G_SEEK_ALIGN;
+GrabState gState = SEEK_ALIGN;
 
-// base state machine
+// base state machine (base area 코드 그대로 사용)
 enum BaseState {
-  B_SEEK_BASE,
-  B_APPROACH_BASE,
-  B_RELEASE_DONE
+  SEEK_BASE,
+  APPROACH_BASE,
+  RELEASE_DONE
 };
 
-BaseState bState = B_SEEK_BASE;
+BaseState bState = SEEK_BASE;
 
+float baseAreaSmooth = 0.0f;
 bool alreadyReleased = false;
 
 // motor helpers
+
 uint8_t clampPWM(int v) {
   if (v < 0) v = 0;
   if (v > 255) v = 255;
@@ -107,23 +115,44 @@ void motorsStop() {
   motorRaw(0, LOW, 0, LOW);
 }
 
-void turnLeft() {
-  motorRaw(TURN_PWM, LOW, TURN_PWM, HIGH);
+// ball phase low level motions
+
+void turnLeftBall() {
+  motorRaw(TURN_PWM_BALL, LOW, TURN_PWM_BALL, HIGH);
 }
 
-void turnRight() {
-  motorRaw(TURN_PWM, HIGH, TURN_PWM, LOW);
+void turnRightBall() {
+  motorRaw(TURN_PWM_BALL, HIGH, TURN_PWM_BALL, LOW);
 }
 
-void slowSeekSpin() {
-  motorRaw(SEEK_PWM, LOW, SEEK_PWM, HIGH);
+void slowSeekSpinBall() {
+  motorRaw(SEEK_PWM_BALL, LOW, SEEK_PWM_BALL, HIGH);
 }
 
-void forwardCont() {
-  motorRaw(FWD_PWM, LOW, FWD_PWM, LOW);
+void forwardContBall() {
+  motorRaw(FWD_PWM_BALL, LOW, FWD_PWM_BALL, LOW);
+}
+
+// base phase low level motions
+
+void turnLeftBase() {
+  motorRaw(TURN_PWM_BASE, LOW, TURN_PWM_BASE, HIGH);
+}
+
+void turnRightBase() {
+  motorRaw(TURN_PWM_BASE, HIGH, TURN_PWM_BASE, LOW);
+}
+
+void slowSeekSpinBase() {
+  motorRaw(SEEK_PWM_BASE, LOW, SEEK_PWM_BASE, HIGH);
+}
+
+void forwardContBase() {
+  motorRaw(FWD_PWM_BASE, LOW, FWD_PWM_BASE, LOW);
 }
 
 // ultrasonic
+
 long readUltrasonicCM(uint8_t trig, uint8_t echo) {
   digitalWrite(trig, LOW);
   delayMicroseconds(3);
@@ -136,53 +165,8 @@ long readUltrasonicCM(uint8_t trig, uint8_t echo) {
   return cm;
 }
 
-// select largest green or blue ball
-bool selectBall(int &xOut) {
-  int n = pixy.ccc.getBlocks();
-  uint32_t bestArea = 0;
-  int bestX = -1;
+// servos
 
-  for (int i = 0; i < n; i++) {
-    auto &b = pixy.ccc.blocks[i];
-    if (b.m_signature == SIG_GREEN || b.m_signature == SIG_BLUE) {
-      uint32_t area = (uint32_t)b.m_width * b.m_height;
-      if (area > bestArea) {
-        bestArea = area;
-        bestX = b.m_x;
-      }
-    }
-  }
-
-  if (bestArea == 0) return false;
-  xOut = bestX;
-  return true;
-}
-
-// select largest base block (sig 1), ignore tiny noise
-bool selectBaseBlock(int &xOut, uint32_t &areaOut) {
-  int n = pixy.ccc.getBlocks();
-  uint32_t bestArea = 0;
-  int bestX = -1;
-
-  for (int i = 0; i < n; i++) {
-    auto &b = pixy.ccc.blocks[i];
-    if (b.m_signature == SIG_BASE) {
-      uint32_t area = (uint32_t)b.m_width * b.m_height;
-      if (area < BASE_AREA_MIN) continue;
-      if (area > bestArea) {
-        bestArea = area;
-        bestX = b.m_x;
-      }
-    }
-  }
-
-  if (bestArea == 0) return false;
-  xOut = bestX;
-  areaOut = bestArea;
-  return true;
-}
-
-// servo helpers
 void servoHold() {
   leftServo.writeMicroseconds(leftHold);
   rightServo.writeMicroseconds(rightHold);
@@ -193,12 +177,13 @@ void servoGrab() {
   rightServo.writeMicroseconds(rightGrab);
 }
 
-void servoReleaseInstant() {
+void servoRelease() {
   leftServo.writeMicroseconds(leftRelease);
   rightServo.writeMicroseconds(rightRelease);
 }
 
-// slow open from grab to release and stay open
+// slow open and stay open
+
 void servoReleaseSlow() {
   int l0 = leftGrab;
   int r0 = rightGrab;
@@ -206,16 +191,73 @@ void servoReleaseSlow() {
   for (int step = 0; step <= 100; step++) {
     int lv = l0 + (leftRelease - l0) * step / 100;
     int rv = r0 + (rightRelease - r0) * step / 100;
+
     leftServo.writeMicroseconds(lv);
     rightServo.writeMicroseconds(rv);
     delay(12);
   }
+}
+
+void servoReleaseSlowHold() {
   leftServo.writeMicroseconds(leftRelease);
   rightServo.writeMicroseconds(rightRelease);
 }
 
-// ball phase state machine
-void updateBallPhase() {
+// select largest green or blue ball (공 테스트 코드 그대로)
+
+bool selectBall(int &xOut) {
+  int n = pixy.ccc.getBlocks();
+  uint32_t bestArea = 0;
+  int bestX = -1;
+
+  for (int i = 0; i < n; i++) {
+    auto &b = pixy.ccc.blocks[i];
+
+    if (b.m_signature == SIG_GREEN || b.m_signature == SIG_BLUE) {
+      uint32_t area = (uint32_t)b.m_width * b.m_height;
+      if (area > bestArea) {
+        bestArea = area;
+        bestX = b.m_x;
+      }
+    }
+  }
+
+  if (bestArea == 0) return false;
+
+  xOut = bestX;
+  return true;
+}
+
+// base detection (sig 1, area 최대, 작은 건 버림)
+
+bool selectBaseBlock(int &xOut, uint32_t &areaOut) {
+  int n = pixy.ccc.getBlocks();
+  uint32_t bestArea = 0;
+  int bestX = -1;
+
+  for (int i = 0; i < n; i++) {
+    auto &b = pixy.ccc.blocks[i];
+    if (b.m_signature == SIG_BASE) {
+      uint32_t area = (uint32_t)b.m_width * b.m_height;
+      if (area < BASE_AREA_MIN) continue;
+
+      if (area > bestArea) {
+        bestArea = area;
+        bestX = b.m_x;
+      }
+    }
+  }
+
+  if (bestArea == 0) return false;
+
+  xOut = bestX;
+  areaOut = bestArea;
+  return true;
+}
+
+// ball phase one step (테스트에서 잘 됐던 loop 그대로 함수로 감싼 것)
+
+void ballLoopOneStep() {
   int ballX = 0;
   bool hasBall = selectBall(ballX);
   long dist = readUltrasonicCM(US_TRIG, US_ECHO);
@@ -227,69 +269,74 @@ void updateBallPhase() {
   Serial.print(" dist=");
   Serial.print(dist);
   Serial.print("cm ");
+
+  int error = 0;
   if (hasBall) {
-    int err = ballX - CENTER_X;
+    error = ballX - CENTER_X;
     Serial.print(" x=");
     Serial.print(ballX);
     Serial.print(" err=");
-    Serial.print(err);
+    Serial.print(error);
   }
   Serial.println();
 
   switch (gState) {
 
-    case G_SEEK_ALIGN: {
+    case SEEK_ALIGN: {
       if (!hasBall) {
-        slowSeekSpin();
+        Serial.println("[BALL] no ball  seek spin");
+        slowSeekSpinBall();
         delay(60);
         return;
       }
 
-      int error = ballX - CENTER_X;
       if (abs(error) > TOL_ALIGN_BALL) {
-        if (error < 0) turnLeft();
-        else           turnRight();
-        delay(40);
+        if (error < 0) {
+          Serial.println("[BALL] SEEK  turn left");
+          turnLeftBall();
+        } else {
+          Serial.println("[BALL] SEEK  turn right");
+          turnRightBall();
+        }
+        delay(60);
         motorsStop();
       } else {
+        Serial.println("[BALL] SEEK  aligned  -> APPROACH_US");
         motorsStop();
-        gState = G_APPROACH_US;
+        gState = APPROACH_US;
       }
       break;
     }
 
-    case G_APPROACH_US: {
+    case APPROACH_US: {
       if (!hasBall) {
+        Serial.println("[BALL] APPROACH  lost ball  -> SEEK_ALIGN");
         motorsStop();
-        gState = G_SEEK_ALIGN;
+        gState = SEEK_ALIGN;
         break;
       }
 
-      int error = ballX - CENTER_X;
-
-      // grab 조건  거리와 정렬 둘 다
-      if (dist > 0 && dist <= TARGET_GRAB_CM &&
-          abs(error) <= TOL_GRAB_ALIGN_BALL) {
-
+      if (dist > 0 && dist <= TARGET_GRAB_CM && abs(error) <= TOL_GRAB_ALIGN_BALL) {
+        Serial.println("[BALL] APPROACH  grab distance and aligned  GRAB");
         motorsStop();
         servoGrab();
         delay(400);
-        gState = G_GRAB_DONE;
+        gState = GRAB_DONE;
         break;
       }
 
-      // 심하게 틀어졌으면 회전 먼저
       if (abs(error) > BIG_MISALIGN_BALL) {
-        if (error < 0) turnLeft();
-        else           turnRight();
-        delay(30);
+        Serial.println("[BALL] APPROACH  big misalign  turn only");
+        if (error < 0) turnLeftBall();
+        else           turnRightBall();
+        delay(50);
         motorsStop();
         break;
       }
 
-      // 여기에서는 정렬은 어느 정도 유지된 상태
       if (dist < 0 || dist > TARGET_GRAB_CM) {
-        forwardCont();
+        Serial.println("[BALL] APPROACH  forward smooth");
+        forwardContBall();
         delay(40);
       } else {
         motorsStop();
@@ -297,16 +344,17 @@ void updateBallPhase() {
       break;
     }
 
-    case G_GRAB_DONE: {
+    case GRAB_DONE: {
       motorsStop();
-      // phase 전환은 loop에서 처리
+      delay(100);
       break;
     }
   }
 }
 
-// base phase state machine
-void updateBasePhase() {
+// base phase one step (base area 코드 loop를 그대로 함수로 옮김)
+
+void baseLoopOneStep() {
   if (alreadyReleased) {
     motorsStop();
     delay(50);
@@ -317,9 +365,18 @@ void updateBasePhase() {
   uint32_t baseAreaRaw = 0;
   bool hasBase = selectBaseBlock(baseX, baseAreaRaw);
 
+  if (hasBase) {
+    if (baseAreaSmooth <= 0.0f) baseAreaSmooth = baseAreaRaw;
+    else baseAreaSmooth = AREA_SMOOTH_ALPHA * baseAreaSmooth
+                        + (1.0f - AREA_SMOOTH_ALPHA) * baseAreaRaw;
+  } else {
+    baseAreaSmooth *= 0.9f;
+    if (baseAreaSmooth < 1.0f) baseAreaSmooth = 0.0f;
+  }
+
   Serial.print("[BASE] st=");
   Serial.print((int)bState);
-  Serial.print(" hasBase=");
+  Serial.print(" has=");
   Serial.print(hasBase);
   if (hasBase) {
     int e = baseX - CENTER_X;
@@ -329,14 +386,16 @@ void updateBasePhase() {
     Serial.print(e);
     Serial.print(" areaRaw=");
     Serial.print(baseAreaRaw);
+    Serial.print(" areaSmooth=");
+    Serial.print(baseAreaSmooth);
   }
   Serial.println();
 
   switch (bState) {
 
-    case B_SEEK_BASE: {
+    case SEEK_BASE: {
       if (!hasBase) {
-        slowSeekSpin();
+        slowSeekSpinBase();
         delay(60);
         return;
       }
@@ -344,27 +403,26 @@ void updateBasePhase() {
       int error = baseX - CENTER_X;
 
       if (abs(error) > TOL_ALIGN_BASE) {
-        if (error < 0) turnLeft();
-        else           turnRight();
-        delay(40);
+        if (error < 0) turnLeftBase();
+        else           turnRightBase();
+        delay(60);
         motorsStop();
       } else {
         motorsStop();
-        bState = B_APPROACH_BASE;
+        bState = APPROACH_BASE;
       }
       break;
     }
 
-    case B_APPROACH_BASE: {
+    case APPROACH_BASE: {
       if (!hasBase) {
         motorsStop();
-        bState = B_SEEK_BASE;
+        bState = SEEK_BASE;
         break;
       }
 
       int error = baseX - CENTER_X;
 
-      // release 조건  raw area 기준, 아직 안 열린 상태
       if (!alreadyReleased &&
           baseAreaRaw >= BASE_AREA_RELEASE &&
           abs(error) <= TOL_ALIGN_BASE) {
@@ -372,31 +430,36 @@ void updateBasePhase() {
         motorsStop();
 
         servoReleaseSlow();
+        servoReleaseSlowHold();
 
+        baseAreaSmooth = 0.0f;
         alreadyReleased = true;
-        bState = B_RELEASE_DONE;
+        bState = RELEASE_DONE;
         break;
       }
 
       if (abs(error) > BIG_MISALIGN_BASE) {
-        if (error < 0) turnLeft();
-        else           turnRight();
-        delay(30);
+        if (error < 0) turnLeftBase();
+        else           turnRightBase();
+        delay(50);
         motorsStop();
         break;
       }
 
-      forwardCont();
-      delay(30);
+      forwardContBase();
+      delay(40);
       break;
     }
 
-    case B_RELEASE_DONE: {
+    case RELEASE_DONE: {
       motorsStop();
+      delay(100);
       break;
     }
   }
 }
+
+// setup
 
 void setup() {
   Serial.begin(115200);
@@ -421,21 +484,25 @@ void setup() {
   pixy.setLamp(0, 0);
 
   phase = PHASE_FIND_BALL;
-  gState = G_SEEK_ALIGN;
-  bState = B_SEEK_BASE;
+  gState = SEEK_ALIGN;
+  bState = SEEK_BASE;
+  baseAreaSmooth = 0.0f;
   alreadyReleased = false;
 
-  Serial.println("Full robot  ball grab with ultrasonic, base score with Pixy");
+  Serial.println("integrated ball grab plus base area release");
 }
+
+// loop
 
 void loop() {
   switch (phase) {
 
     case PHASE_FIND_BALL: {
-      updateBallPhase();
-      if (gState == G_GRAB_DONE) {
+      ballLoopOneStep();
+      if (gState == GRAB_DONE) {
         phase = PHASE_FIND_BASE;
-        bState = B_SEEK_BASE;
+        bState = SEEK_BASE;
+        baseAreaSmooth = 0.0f;
         alreadyReleased = false;
         delay(200);
       }
@@ -443,8 +510,8 @@ void loop() {
     }
 
     case PHASE_FIND_BASE: {
-      updateBasePhase();
-      if (bState == B_RELEASE_DONE && alreadyReleased) {
+      baseLoopOneStep();
+      if (bState == RELEASE_DONE && alreadyReleased) {
         phase = PHASE_DONE;
       }
       break;
@@ -452,12 +519,6 @@ void loop() {
 
     case PHASE_DONE: {
       motorsStop();
-      // 여기서 다시 루프 돌고 싶으면 아래 코드로 초기화
-      // phase = PHASE_FIND_BALL;
-      // gState = G_SEEK_ALIGN;
-      // bState = B_SEEK_BASE;
-      // alreadyReleased = false;
-      // servoHold();
       delay(100);
       break;
     }
